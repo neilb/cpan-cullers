@@ -1,0 +1,149 @@
+#!/usr/local/bin/perl
+#
+# cpan-cullers
+#
+# Work out how much diskspace is taken up on CPAN by old releases,
+# and list all authors, which how much space each author could free up.
+#
+# To find the top 20 people who're taking up space with old releases
+#
+#   cpan-cullers | head -20
+#
+# Or to find yourself (my pause id is NEILB),
+#
+#   cpan-cullers | grep NEILB
+#
+# We're processing lines like this:
+#
+#   ./authors/id/A/AA/AAKHTER:
+#   total 68
+#   drwxrwxr-x.  2 mirror mirror  4096 May 14 14:22 .
+#   drwxrwxr-x. 19 mirror mirror  4096 Jun  9 06:25 ..
+#   -r--r--r--.  1 mirror mirror  1542 May 14 14:22 CHECKSUMS
+#   -rw-rw-r--.  1 mirror mirror   402 Aug 13  2005 Visio-1.009.meta
+#   -rw-rw-r--.  1 mirror mirror  1063 Feb  1  2005 Visio-1.009.readme
+#   -rw-rw-r--.  1 mirror mirror 11956 Aug 13  2005 Visio-1.009.tar.gz
+#   -rw-rw-r--.  1 mirror mirror   402 Aug 13  2005 Visio-1.010.meta
+#   -rw-rw-r--.  1 mirror mirror  2710 Aug 13  2005 Visio-1.010.readme
+#   -rw-rw-r--.  1 mirror mirror 25408 Nov 10  2005 Visio-1.010.tar.gz
+#
+# We use the fact that for each dist, the last release we see is *probably* the latest
+# and any previously seen ones are ok to delete. We're not actually deleting, so this
+# is a good enough approximation: the main thing is that we want to spot when there are
+# multiple releases of the same dist.
+#
+# We remember the sizes of everything we've seen, and when we've decided that a given
+# .tar.gz could be deleted, we check if we've seen a corresponding .meta and .readme
+#
+# Should handle .zip's as well, but meh. Pull requests welcome :-)
+#
+use 5.010;
+use strict;
+use warnings;
+use HTTP::Tiny;
+use File::Slurper qw/ write_binary /;
+use PerlIO::gzip;
+use CPAN::DistnameInfo;
+
+my $URL            = "https://www.cpan.org/indices/ls-lR.gz";
+my $LOCAL_FILENAME = "/tmp/ls-lR.gz";
+my %saving;
+
+get_ll_output() unless -f $LOCAL_FILENAME;
+process_file();
+generate_output();
+
+sub get_ll_output
+{
+    my $response = HTTP::Tiny->new()->get($URL);
+
+    if (not $response->{success}) {
+        die "can't get $URL: $response->{status} $response->{reason}\n";
+    }
+
+    write_binary($LOCAL_FILENAME, $response->{content});
+}
+
+sub process_file
+{
+    my $inauthor = 0;
+    my $pause_id;
+    my %latest;
+    my $prefix;
+    my %dists;
+    my %size;
+
+    open(my $fh, '<:gzip', $LOCAL_FILENAME)
+        || die "can't read $LOCAL_FILENAME: $!\n";
+
+    while (<$fh>) {
+        if (m!^\./(authors/id/./../([A-Z0-9_]+)):!) {
+            $prefix   = $1;
+            $pause_id = $2;
+            $inauthor = 1;
+            next;
+        }
+        if ($inauthor && /^$/) {
+            my $saving = 0;
+            foreach my $distname (sort keys %latest) {
+                foreach my $version (sort keys %{ $dists{$distname} }) {
+                    if ($version ne $latest{$distname}) {
+                        my $file = $dists{$distname}{$version};
+                        $saving += $file->[2];
+
+                        foreach my $extension (qw/ readme meta /) {
+                            (my $path = $file->[1]) =~ s/\.tar.gz$/\.${extension}/;
+                            $saving += $size{$path} if exists $size{$path};
+                        }
+                    }
+                }
+            }
+            $saving{$pause_id} = $saving;
+            $inauthor = 0;
+            %dists    = ();
+            %latest   = ();
+            %size     = ();
+            next;
+        }
+
+        next unless $inauthor;
+
+        # we're processing an author directory's entries
+        next if $inauthor && /^total /;
+        my ($p, $i, $u, $g, $size, $m, $d, $y, $path) = split(/\s+/, $_);
+        if (!defined($path)) {
+            die "can't get path from $_\n";
+        }
+        $size{$path} = $size;
+        next unless $path =~ m!\.tar\.gz$!;
+
+        # we're never going to purge perl-5 releases.
+        # TODO: should release candidates be culling candidates?
+        next if $path =~ /^perl-5/;
+
+        # For now we ignore it if it doesn't have the expected path format
+        my $di = CPAN::DistnameInfo->new($path)
+                 // next;
+
+        my $distname = $di->dist;
+        my $version  = $di->version;
+        next unless defined($distname) && defined($version);
+
+        # we just keep overwriting, using the fact that releases are in order
+        # if not, then we should use version to compare, I guess.
+        $latest{$distname} = $di->version;
+        $dists{$distname}{$version} = [$di, $path, $size];
+    }
+
+    close($fh);
+}
+
+sub generate_output
+{
+    my $position = 1;
+    foreach my $pause_id (sort { $saving{$b} <=> $saving{$a} } keys %saving) {
+        printf "%4d.  %9d : %s\n", $position, $saving{$pause_id}, $pause_id;
+        $position++;
+    }
+}
+
