@@ -92,7 +92,7 @@ sub process_file
                         $saving += $file->[2];
 
                         foreach my $extension (qw/ readme meta /) {
-                            (my $path = $file->[1]) =~ s/\.tar.gz$/\.${extension}/;
+                            (my $path = $file->[1]) =~ s/\.(tar.gz|tgz|zip)$/\.${extension}/;
                             $saving += $size{$path} if exists $size{$path};
                         }
                     }
@@ -115,7 +115,7 @@ sub process_file
             die "can't get path from $_\n";
         }
         $size{$path} = $size;
-        next unless $path =~ m!\.tar\.gz$!;
+        next unless $path =~ m!\.(tar\.gz|tgz|zip)$!;
 
         # we're never going to purge perl-5 releases.
         # TODO: should release candidates be culling candidates?
